@@ -113,6 +113,11 @@ const orderSchema = new mongoose.Schema({
     min: 0,
     max: 100
   },
+  prepMinutes: {
+    type: Number,
+    default: 20,
+    min: 1
+  },
   estimatedMinutes: {
     type: Number,
     default: 20,

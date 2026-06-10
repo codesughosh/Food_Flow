@@ -385,15 +385,55 @@
     const root = document.querySelector("[data-queue]");
     if (!root) return;
     const orderNumber = new URLSearchParams(location.search).get("order") || storageGet("foodflow_last_order", {}).id;
-    if (!orderNumber) return;
-    try {
-      const order = await api(`/api/orders/${orderNumber}`);
-      root.querySelector("[data-position]").textContent = order.queueNumber;
-      root.querySelector("[data-wait]").textContent = `${order.estimatedMinutes} min`;
-      root.querySelector("[data-progress]").style.width = `${order.progress}%`;
-    } catch (error) {
-      toast(error.message);
+    if (!orderNumber) {
+      root.innerHTML = `<div class="ff-card p-5 text-center"><h2 class="ff-title">No active order selected</h2><a class="ff-btn ff-btn-primary mt-3" href="my-orders.html">View My Orders</a></div>`;
+      return;
     }
+
+    async function refreshQueue() {
+      try {
+        const order = await api(`/api/orders/${orderNumber}`);
+        const queue = order.queue || {};
+        const waitSeconds = Number(queue.estimatedSeconds ?? 0);
+        const wait = Number(queue.estimatedMinutes ?? order.estimatedMinutes ?? 0);
+        const progress = Number(queue.progress ?? order.progress ?? 0);
+        const status = queue.status || order.status || "--";
+
+        root.querySelector("[data-position]").textContent = queue.queueNumber || order.queueNumber || "--";
+        root.querySelector("[data-wait]").textContent = waitSeconds > 0 ? formatWait(waitSeconds, wait) : "Ready now";
+        root.querySelector("[data-progress]").style.width = `${progress}%`;
+        root.querySelector("[data-queue-status]").textContent = status;
+        root.querySelector("[data-orders-ahead]").textContent = queue.ordersAhead ?? "--";
+        root.querySelector("[data-total-items]").textContent = queue.totalItems ?? "--";
+        root.querySelector("[data-active-orders]").textContent = queue.activeOrders ?? "--";
+        root.querySelector("[data-kitchen-stations]").textContent = queue.kitchenStations ?? "--";
+        root.querySelector("[data-queue-updated]").textContent = queue.updatedAt ? new Date(queue.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--";
+        updateTimeline(status);
+      } catch (error) {
+        toast(error.message);
+      }
+    }
+
+    await refreshQueue();
+    window.setInterval(refreshQueue, 10000);
+  }
+
+  function formatWait(seconds, fallbackMinutes) {
+    if (!seconds && fallbackMinutes) return `${fallbackMinutes} min`;
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    if (minutes <= 0) return `${remainder} sec`;
+    return `${minutes} min ${String(remainder).padStart(2, "0")} sec`;
+  }
+
+  function updateTimeline(status) {
+    const order = ["Preparing", "Cooking", "Ready", "Completed"];
+    const currentIndex = Math.max(0, order.indexOf(status));
+    document.querySelectorAll("[data-queue-timeline] [data-step]").forEach(item => {
+      const index = order.indexOf(item.dataset.step);
+      item.classList.toggle("done", index < currentIndex || status === "Completed" || status === "Delivered");
+      item.classList.toggle("active", index === currentIndex && status !== "Completed" && status !== "Delivered");
+    });
   }
 
   async function renderAdmin() {
@@ -405,31 +445,35 @@
     }
     let statCards = [];
     let adminOrders = [];
+    let adminSummary = { stats: {} };
     try {
-      const summary = await api("/api/admin/summary");
+      adminSummary = await api("/api/admin/summary");
       statCards = [
-        ["Today's Orders", String(summary.stats.todayOrders), "receipt_long"],
-        ["Revenue", money.format(summary.stats.revenue), "payments"],
-        ["Pending Orders", String(summary.stats.pendingOrders), "pending_actions"],
-        ["Completed", String(summary.stats.completedOrders), "task_alt"]
+        ["Total Orders", String(adminSummary.stats.totalOrders ?? 0), "receipt_long"],
+        ["Revenue", money.format(adminSummary.stats.revenue ?? 0), "payments"],
+        ["Pending Orders", String(adminSummary.stats.pendingOrders ?? 0), "pending_actions"],
+        ["Completed", String(adminSummary.stats.completedOrders ?? 0), "task_alt"]
       ];
-      adminOrders = summary.todayOrders;
+      adminOrders = adminSummary.recentOrders || adminSummary.todayOrders || [];
     } catch (error) {
       root.innerHTML = `<div class="ff-card p-5 text-center"><h2 class="ff-title">Admin access required</h2><p class="text-secondary-emphasis">${error.message}</p><a class="ff-btn ff-btn-primary mt-3" href="login.html">Login</a></div>`;
       return;
     }
     if (adminPage === "dashboard") {
-      root.innerHTML = `<div class="row g-4 mb-4">${statCards.map(([label, value, icon]) => `<div class="col-md-6 col-xl-3"><div class="ff-card p-4"><span class="material-symbols-outlined text-primary fs-1">${icon}</span><p class="text-secondary-emphasis mb-1">${label}</p><h2 class="fw-black">${value}</h2></div></div>`).join("")}</div><div class="row g-4"><div class="col-lg-8"><div class="ff-card p-4"><h2 class="h4 fw-bold">Today's Orders</h2>${adminOrders.length ? adminTable(adminOrders) : `<div class="p-4 text-center text-secondary-emphasis">No MongoDB orders today.</div>`}</div></div><div class="col-lg-4"><div class="ff-card p-4"><h2 class="h4 fw-bold">Recent Activity</h2><div class="p-4 text-center text-secondary-emphasis">Activity will appear after orders are created.</div></div></div></div>`;
+      root.innerHTML = `<div class="row g-4 mb-4">${statCards.map(([label, value, icon]) => `<div class="col-md-6 col-xl-3"><div class="ff-card p-4"><span class="material-symbols-outlined text-primary fs-1">${icon}</span><p class="text-secondary-emphasis mb-1">${label}</p><h2 class="fw-black">${value}</h2></div></div>`).join("")}</div><div class="row g-4"><div class="col-lg-8"><div class="ff-card p-4"><h2 class="h4 fw-bold">Recent Orders</h2>${adminOrders.length ? adminTable(adminOrders) : `<div class="p-4 text-center text-secondary-emphasis">No MongoDB orders yet.</div>`}</div></div><div class="col-lg-4"><div class="ff-card p-4"><h2 class="h4 fw-bold">Today</h2><div class="p-4 text-center"><div class="display-5 fw-black text-primary">${adminSummary.stats.todayOrders ?? 0}</div><p class="mb-0 text-secondary-emphasis">Orders placed today</p></div></div></div></div>`;
+    } else if (adminPage === "orders") {
+      root.innerHTML = `<div class="ff-card p-4"><div class="d-flex justify-content-between align-items-center gap-3 flex-wrap mb-3"><div><h2 class="h4 fw-bold mb-1">All Recent Orders</h2><p class="text-secondary-emphasis mb-0">Latest ${adminOrders.length} orders from MongoDB</p></div><a class="ff-btn ff-btn-ghost py-2 px-4" href="dashboard.html">Dashboard</a></div>${adminOrders.length ? adminTable(adminOrders) : `<div class="p-4 text-center text-secondary-emphasis">No MongoDB orders yet.</div>`}</div>`;
     } else if (["orders", "foods", "categories", "customers", "reports"].includes(adminPage)) {
       renderAdminSection(root);
     }
   }
 
   function adminTable(rows) {
+    const statuses = ["Preparing", "Cooking", "Ready", "Completed", "Delivered", "Cancelled"];
     return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>ID</th><th>Items</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(row => {
       const id = row.orderNumber || row.id;
       const items = Array.isArray(row.items) ? row.items.reduce((sum, item) => sum + item.quantity, 0) : row.items;
-      return `<tr><td>${id}</td><td>${items}</td><td>${money.format(row.total)}</td><td><select class="form-select form-select-sm" data-status data-order-id="${row._id || ""}"><option>${row.status}</option><option>Preparing</option><option>Cooking</option><option>Ready</option><option>Completed</option></select></td><td><button class="ff-btn ff-btn-ghost py-2 px-3" data-admin-save>Save</button></td></tr>`;
+      return `<tr><td>${id}</td><td>${items}</td><td>${money.format(row.total)}</td><td><select class="form-select form-select-sm" data-status data-order-id="${row._id || ""}">${statuses.map(status => `<option value="${status}" ${status === row.status ? "selected" : ""}>${status}</option>`).join("")}</select></td><td><button class="ff-btn ff-btn-ghost py-2 px-3" data-admin-save>Save</button></td></tr>`;
     }).join("")}</tbody></table></div>`;
   }
 
@@ -468,12 +512,22 @@
         const orderId = statusSelect?.dataset.orderId;
         if (orderId) {
           try {
-            await api(`/api/admin/orders/${orderId}/status`, {
+            adminSave.disabled = true;
+            adminSave.textContent = "Saving";
+            const order = await api(`/api/admin/orders/${orderId}/status`, {
               method: "PATCH",
               body: JSON.stringify({ status: statusSelect.value })
             });
+            statusSelect.value = order.status;
+            adminSave.textContent = "Saved";
             toast("Status updated in MongoDB");
+            setTimeout(() => {
+              adminSave.disabled = false;
+              adminSave.textContent = "Save";
+            }, 900);
           } catch (error) {
+            adminSave.disabled = false;
+            adminSave.textContent = "Save";
             toast(error.message);
           }
         } else {
@@ -515,7 +569,7 @@
                 }
               })
             });
-            storageSet("foodflow_last_order", { id: order.orderNumber, queue: order.queueNumber, estimatedMinutes: order.estimatedMinutes });
+            storageSet("foodflow_last_order", { id: order.orderNumber, queue: order.queueNumber, estimatedMinutes: order.queue?.estimatedMinutes || order.estimatedMinutes });
             setCart([]);
             location.href = "order-success.html";
           } catch (error) {
@@ -533,7 +587,8 @@
             localStorage.setItem("foodflow_token", result.token);
             storageSet("foodflow_user", result.user);
             toast("Login successful");
-            setTimeout(() => location.href = form.dataset.adminLogin ? "dashboard.html" : "profile.html", 600);
+            const destination = form.dataset.adminLogin ? "dashboard.html" : result.user?.role === "admin" ? "admin/dashboard.html" : "profile.html";
+            setTimeout(() => location.href = destination, 600);
           } catch (error) {
             toast(error.message);
           }
@@ -671,13 +726,23 @@
           form.querySelector("[name=pincode]").value = address.pincode || "";
 
           const stats = profileRoot.querySelector("[data-profile-stats]");
-          let orders = [];
+          let orderCount = 0;
+          let statsHref = "my-orders.html";
+          let statsLabel = "View order history";
           try {
-            orders = await api("/api/orders");
+            if (user.role === "admin") {
+              const summary = await api("/api/admin/summary");
+              orderCount = summary.stats.totalOrders ?? 0;
+              statsHref = "admin/dashboard.html";
+              statsLabel = "Open admin dashboard";
+            } else {
+              const orders = await api("/api/orders");
+              orderCount = orders.length;
+            }
           } catch (error) {
-            orders = [];
+            orderCount = 0;
           }
-          stats.insertAdjacentHTML("afterbegin", `<div class="col-6"><div class="ff-card p-4 text-center"><div class="display-5 fw-black text-primary">${orders.length}</div><p class="mb-0">Orders</p></div></div><div class="col-6"><div class="ff-card p-4 text-center"><div class="display-5 fw-black text-primary">${user.role}</div><p class="mb-0">Role</p></div></div>`);
+          stats.innerHTML = `<div class="col-6"><div class="ff-card p-4 text-center"><div class="display-5 fw-black text-primary">${orderCount}</div><p class="mb-0">Orders</p></div></div><div class="col-6"><div class="ff-card p-4 text-center"><div class="display-5 fw-black text-primary">${user.role}</div><p class="mb-0">Role</p></div></div><div class="col-12"><a class="ff-card p-4 d-flex justify-content-between align-items-center" href="${statsHref}"><strong>${statsLabel}</strong><span class="material-symbols-outlined">arrow_forward</span></a></div>`;
         } catch (error) {
           profileRoot.innerHTML = `<div class="ff-card p-5 text-center"><h2 class="ff-title">Session expired</h2><p class="text-secondary-emphasis">${error.message}</p><a class="ff-btn ff-btn-primary mt-3" href="login.html">Login</a></div>`;
         }

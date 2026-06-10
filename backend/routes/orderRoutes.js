@@ -2,6 +2,11 @@ const express = require("express");
 const Food = require("../models/Food");
 const Order = require("../models/Order");
 const { protect, optionalAuth } = require("../middleware/auth");
+const {
+  ACTIVE_STATUSES,
+  buildQueueSnapshot,
+  estimatePrepMinutes
+} = require("../utils/queue");
 
 const router = express.Router();
 
@@ -28,7 +33,11 @@ function calculateTotals(items) {
 router.get("/", protect, async (req, res, next) => {
   try {
     const orders = await Order.find({ user: req.user._id }).sort({ createdAt: -1 });
-    res.json(orders);
+    const activeOrders = await Order.find({ status: { $in: ACTIVE_STATUSES } }).sort({ createdAt: 1 });
+    res.json(orders.map(order => ({
+      ...order.toObject(),
+      queue: buildQueueSnapshot(order, activeOrders)
+    })));
   } catch (error) {
     next(error);
   }
@@ -38,7 +47,21 @@ router.get("/:orderNumber", async (req, res, next) => {
   try {
     const order = await Order.findOne({ orderNumber: req.params.orderNumber });
     if (!order) return res.status(404).json({ message: "Order not found" });
-    res.json(order);
+
+    const activeOrders = await Order.find({ status: { $in: ACTIVE_STATUSES } }).sort({ createdAt: 1 });
+    const queue = buildQueueSnapshot(order, activeOrders);
+
+    if (order.status !== queue.status || order.progress !== queue.progress || order.estimatedMinutes !== queue.estimatedMinutes) {
+      order.status = queue.status;
+      order.progress = queue.progress;
+      order.estimatedMinutes = queue.estimatedMinutes;
+      await order.save();
+    }
+
+    res.json({
+      ...order.toObject(),
+      queue
+    });
   } catch (error) {
     next(error);
   }
@@ -73,6 +96,7 @@ router.post("/", optionalAuth, async (req, res, next) => {
     });
 
     const totals = calculateTotals(items);
+    const prepMinutes = estimatePrepMinutes(items);
     const order = await Order.create({
       user: req.user?._id || null,
       orderNumber: createOrderNumber(),
@@ -81,11 +105,21 @@ router.post("/", optionalAuth, async (req, res, next) => {
       ...totals,
       paymentMethod: paymentMethod || "UPI on delivery",
       deliveryAddress,
-      estimatedMinutes: Math.min(45, 12 + items.reduce((sum, item) => sum + item.quantity, 0) * 4)
+      prepMinutes,
+      estimatedMinutes: prepMinutes,
+      progress: 5
     });
+
+    const activeOrders = await Order.find({ status: { $in: ACTIVE_STATUSES } }).sort({ createdAt: 1 });
+    const queue = buildQueueSnapshot(order, activeOrders);
+    order.status = queue.status;
+    order.progress = queue.progress;
+    order.estimatedMinutes = queue.estimatedMinutes;
+    await order.save();
 
     res.status(201).json({
       ...order.toObject(),
+      queue,
       userLinked: Boolean(req.user)
     });
   } catch (error) {
